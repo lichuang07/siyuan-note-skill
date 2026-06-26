@@ -1,0 +1,13 @@
+{
+  "name": "siyuan-note",
+  "version": "1.0.0",
+  "description": "通过思源笔记 API 完成笔记本浏览、文档树查看、文档读写、全文搜索、块更新等操作",
+  "author": "lichuang",
+  "source": "custom",
+  "tags": ["siyuan", "note", "api", "markdown"],
+  "compatibility": {
+    "siyuan": ">=3.0.0",
+    "python": ">=3.8"
+  },
+  "requires": ["requests"]
+}
