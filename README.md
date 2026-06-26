@@ -17,7 +17,7 @@ Marvis 思源笔记操作技能，通过思源笔记 HTTP API 实现笔记的增
 将本目录放置于 Marvis 技能目录下：
 
 ```
-git clone https://github.com/<your-username>/siyuan-note.git ~/.marvis/skills/custom/siyuan-note/
+git clone https://github.com/lichuang07/siyuan-note-skill.git ~/.marvis/skills/custom/siyuan-note/
 ```
 
 或直接复制文件夹到 Marvis 技能目录：
