@@ -1,10 +1,10 @@
 {
   "name": "siyuan-note",
-  "version": "1.0.0",
-  "description": "通过思源笔记 API 完成笔记本浏览、文档树查看、文档读写、全文搜索、块更新等操作",
+  "version": "1.1.0",
+  "description": "思源笔记 Python 客户端：支持 .env 配置自动加载、资源文件上传/管理、笔记本/路径排除过滤，以及笔记本浏览、文档树查看、文档读写、全文搜索、块更新等操作",
   "author": "lichuang",
   "source": "custom",
-  "tags": ["siyuan", "note", "api", "markdown"],
+  "tags": ["siyuan", "note", "api", "markdown", "assets", "env"],
   "compatibility": {
     "siyuan": ">=3.0.0",
     "python": ">=3.8"

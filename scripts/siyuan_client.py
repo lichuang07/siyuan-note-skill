@@ -1,11 +1,13 @@
 """
-思源笔记 Python 客户端
-======================
-封装了思源笔记的常用 API，传入 api_token 即可操作。
+思源笔记 Python 客户端 v1.1.0
+==============================
+封装了思源笔记的常用 API，支持 .env 配置、资源文件操作、排除过滤。
 
 用法:
-    from siyuan_client import SiYuanClient
+    # 方式一：从 .env 加载（推荐）
+    client = SiYuanClient.from_env()
 
+    # 方式二：手动传参
     client = SiYuanClient(token="your_token", base_url="http://127.0.0.1:6806")
 
     # 测试连接
@@ -23,24 +25,92 @@
     # 更新块
     client.update_block(block_id, "新内容")
 
-    # 搜索
+    # 搜索（自动排除过滤）
     results = client.search("关键词")
+
+    # 资源文件
+    path = client.get_asset_path("block_id", "image.png")
 """
 
+import os
 import requests
 import json
+from pathlib import Path
 from typing import Optional
+
+
+def _load_env(env_path: Optional[str] = None) -> dict:
+    """手动解析 .env 文件，无需 python-dotenv 依赖"""
+    if env_path is None:
+        # 查找当前目录及上级目录的 .env
+        search_dir = Path(__file__).resolve().parent
+        for _ in range(3):
+            candidate = search_dir / ".env"
+            if candidate.exists():
+                env_path = str(candidate)
+                break
+            search_dir = search_dir.parent
+
+    if env_path is None or not os.path.isfile(env_path):
+        return {}
+
+    config = {}
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                config[key] = value
+    return config
 
 
 class SiYuanClient:
     """思源笔记 API 客户端"""
 
-    def __init__(self, token: str, base_url: str = "http://127.0.0.1:6806"):
+    def __init__(
+        self,
+        token: str,
+        base_url: str = "http://127.0.0.1:6806",
+        exclude_notebooks: Optional[list[str]] = None,
+        exclude_paths: Optional[list[str]] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.headers = {
             "Authorization": f"Token {token}",
             "Content-Type": "application/json",
         }
+        self.exclude_notebooks = exclude_notebooks or []
+        self.exclude_paths = exclude_paths or []
+
+    @classmethod
+    def from_env(cls, env_path: Optional[str] = None) -> "SiYuanClient":
+        """从 .env 文件加载配置并创建客户端"""
+        config = _load_env(env_path)
+
+        host = config.get("SIYUAN_HOST", "127.0.0.1")
+        port = config.get("SIYUAN_PORT", "6806")
+        token = config.get("SIYUAN_API_TOKEN", "")
+
+        if not token:
+            raise ValueError("未在 .env 中找到 SIYUAN_API_TOKEN，请先配置")
+
+        exclude_notebooks = [
+            n.strip() for n in config.get("SIYUAN_EXCLUDE_NOTEBOOKS", "").split(",") if n.strip()
+        ]
+        exclude_paths = [
+            p.strip() for p in config.get("SIYUAN_EXCLUDE_PATHS", "").split(",") if p.strip()
+        ]
+
+        return cls(
+            token=token,
+            base_url=f"http://{host}:{port}",
+            exclude_notebooks=exclude_notebooks,
+            exclude_paths=exclude_paths,
+        )
 
     def _post(self, endpoint: str, data: Optional[dict] = None, timeout: int = 10) -> dict:
         """发送 POST 请求"""
@@ -50,6 +120,57 @@ class SiYuanClient:
             return r.json()
         except Exception:
             return {"code": -1, "msg": r.text[:200], "raw": r}
+
+    def _should_exclude(self, box: str = "", hpath: str = "") -> bool:
+        """判断指定笔记本或路径是否应被排除"""
+        if box and box in self.exclude_notebooks:
+            return True
+        if hpath and self.exclude_paths:
+            for p in self.exclude_paths:
+                if hpath == p or hpath.startswith(p + "/"):
+                    return True
+        return False
+
+    def _filter_search_results(self, results: list[dict]) -> list[dict]:
+        """从搜索结果中移除被排除的笔记本/路径"""
+        if not self.exclude_notebooks and not self.exclude_paths:
+            return results
+        return [
+            r for r in results
+            if not self._should_exclude(
+                box=r.get("box", ""),
+                hpath=r.get("hpath", ""),
+            )
+        ]
+
+    def _inject_exclude_clause(self, stmt: str) -> str:
+        """在 SQL 查询的 WHERE 子句中注入排除条件"""
+        if not self.exclude_notebooks and not self.exclude_paths:
+            return stmt
+
+        conditions = []
+        for nb in self.exclude_notebooks:
+            conditions.append(f"box != '{nb}'")
+        for p in self.exclude_paths:
+            conditions.append(f"hpath NOT LIKE '{p}%'")
+
+        if not conditions:
+            return stmt
+
+        exclude_clause = " AND ".join(conditions)
+
+        # 在 WHERE 之后注入
+        stmt_upper = stmt.upper()
+        if "WHERE" in stmt_upper:
+            where_pos = stmt_upper.index("WHERE") + 5
+            return stmt[:where_pos] + " " + exclude_clause + " AND" + stmt[where_pos:]
+        else:
+            # 没有 WHERE，在 FROM 之后添加
+            for keyword in ["ORDER BY", "GROUP BY", "LIMIT", "HAVING"]:
+                if keyword in stmt_upper:
+                    pos = stmt_upper.index(keyword)
+                    return stmt[:pos] + f" WHERE {exclude_clause} " + stmt[pos:]
+            return stmt + f" WHERE {exclude_clause}"
 
     # ─── 系统 ───────────────────────────────────────
 
@@ -69,9 +190,12 @@ class SiYuanClient:
     # ─── 笔记本 ─────────────────────────────────────
 
     def list_notebooks(self) -> list[dict]:
-        """获取所有笔记本列表"""
+        """获取所有笔记本列表（自动排除已配置的笔记本）"""
         resp = self._post("/api/notebook/lsNotebooks")
-        return resp.get("data", {}).get("notebooks", [])
+        notebooks = resp.get("data", {}).get("notebooks", [])
+        if self.exclude_notebooks:
+            notebooks = [n for n in notebooks if n["id"] not in self.exclude_notebooks]
+        return notebooks
 
     def get_notebook(self, notebook_id: str) -> Optional[dict]:
         """获取指定笔记本信息"""
@@ -174,17 +298,84 @@ class SiYuanClient:
 
     def search(self, keyword: str, method: int = 0) -> list[dict]:
         """
-        全文搜索文档
+        全文搜索文档（自动排除已配置的笔记本/路径）
         method: 0=关键字, 1=查询语法, 2=正则, 3=SQL
         """
         resp = self._post("/api/search/fullTextSearchBlock",
                           {"query": keyword, "method": method})
-        return resp.get("data", {}).get("blocks", [])
+        results = resp.get("data", {}).get("blocks", [])
+        return self._filter_search_results(results)
 
     def sql(self, stmt: str) -> list[dict]:
-        """执行 SQL 查询"""
+        """执行 SQL 查询（自动注入排除条件）"""
+        safe_stmt = self._inject_exclude_clause(stmt)
+        resp = self._post("/api/query/sql", {"stmt": safe_stmt})
+        return resp.get("data", [])
+
+    def raw_sql(self, stmt: str) -> list[dict]:
+        """执行原始 SQL 查询（不注入排除条件，用于需要精确控制的场景）"""
         resp = self._post("/api/query/sql", {"stmt": stmt})
         return resp.get("data", [])
+
+    # ─── 资源文件 ──────────────────────────────────
+
+    def get_asset_path(self, block_id: str, asset_name: str) -> Optional[str]:
+        """
+        获取资源文件（图片、附件等）的本地绝对路径。
+        例如：get_asset_path("block_id", "image.png")
+        返回：C:\Users\...\data\assets\image.png
+        """
+        resp = self._post("/api/asset/resolveAssetPath", {
+            "id": block_id,
+            "name": asset_name,
+        })
+        data = resp.get("data", {})
+        return data.get("path") or data.get("localPath") or None
+
+    def upload_asset(self, local_path: str) -> Optional[str]:
+        """
+        上传本地文件到思源笔记资源目录。
+        返回资源文件的相对路径，如 assets/uploaded-image-xxx.png
+        """
+        if not os.path.isfile(local_path):
+            return None
+
+        filename = os.path.basename(local_path)
+
+        # 读取文件内容并转为 data URI
+        with open(local_path, "rb") as f:
+            raw = f.read()
+
+        import base64
+        ext = os.path.splitext(filename)[1].lstrip(".").lower()
+        mime_map = {
+            "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+            "pdf": "application/pdf", "zip": "application/zip",
+        }
+        mime = mime_map.get(ext, "application/octet-stream")
+        data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+
+        resp = self._post("/api/asset/upload", {
+            "assetsDirPath": "",
+            "file": [data_uri],
+        })
+        data = resp.get("data", {})
+        files = data.get("succMap", {})
+
+        # 返回上传后的文件名路径
+        for key in files:
+            return f"assets/{key}"
+        return None
+
+    def list_assets(self, path: str = "") -> list[dict]:
+        """列出资源目录下的文件"""
+        resp = self._post("/api/asset/listAssetDir", {"path": path})
+        return resp.get("data", [])
+
+    def delete_asset(self, asset_path: str) -> dict:
+        """删除资源文件"""
+        return self._post("/api/asset/removeAsset", {"path": asset_path})
 
     # ─── 批量查询 ──────────────────────────────────
 
@@ -242,9 +433,13 @@ class SiYuanClient:
 # ─── 快捷使用 ────────────────────────────────────────
 
 if __name__ == "__main__":
-    # 演示：连接并打印 home 笔记本文档树
-    TOKEN = "your_api_token_here"
-    client = SiYuanClient(token=TOKEN)
+    # 演示：从 .env 加载并打印 home 笔记本文档树
+    try:
+        client = SiYuanClient.from_env()
+    except ValueError as e:
+        print(f"配置错误：{e}")
+        print("请先复制 .env.example 为 .env 并填入 SIYUAN_API_TOKEN")
+        exit(1)
 
     if client.ping():
         print(f"思源笔记 {client.get_version()} 连接成功\n")
